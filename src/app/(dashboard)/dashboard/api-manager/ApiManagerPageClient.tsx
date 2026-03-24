@@ -88,10 +88,33 @@ interface KeyUsageStats {
 interface Model {
   id: string;
   owned_by: string;
+  type?: string;
+  subtype?: string;
+  parent?: string | null;
 }
 
 /** Tuple type for models grouped by provider: [providerName, models[]] */
 type ProviderGroup = [provider: string, models: Model[]];
+
+interface UnifiedModelEntry {
+  id: string;
+  providers: string[];
+  kind: string;
+}
+
+function getModelKind(model: Model): string {
+  if (model.type === "audio") {
+    return model.subtype === "speech" ? "speech" : "transcription";
+  }
+  if (model.type === "image") return "image";
+  if (model.type === "embedding") return "embedding";
+  if (model.type === "rerank") return "rerank";
+  if (model.type === "moderation") return "moderation";
+  if (model.type === "music") return "music";
+  if (model.type === "video") return "video";
+  if (model.type === "search") return "search";
+  return "chat";
+}
 
 export default function ApiManagerPageClient() {
   const t = useTranslations("apiManager");
@@ -106,6 +129,7 @@ export default function ApiManagerPageClient() {
   const [editingKey, setEditingKey] = useState<ApiKey | null>(null);
   const [showPermissionsModal, setShowPermissionsModal] = useState(false);
   const [searchModel, setSearchModel] = useState("");
+  const [catalogSearch, setCatalogSearch] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [usageStats, setUsageStats] = useState<Record<string, KeyUsageStats>>({});
@@ -327,6 +351,7 @@ export default function ApiManagerPageClient() {
 
   // Debounced search for performance
   const debouncedSearchModel = useDebouncedValue(searchModel, 150);
+  const debouncedCatalogSearch = useDebouncedValue(catalogSearch, 150);
 
   // Group models by provider
   const modelsByProvider = useMemo((): ProviderGroup[] => {
@@ -355,6 +380,43 @@ export default function ApiManagerPageClient() {
       )
       .filter(([, models]) => models.length > 0);
   }, [modelsByProvider, debouncedSearchModel]);
+
+  const unifiedModels = useMemo((): UnifiedModelEntry[] => {
+    const grouped = new Map<string, { providers: Set<string>; kinds: Set<string> }>();
+
+    for (const model of allModels) {
+      if (model.parent) continue;
+
+      const existing = grouped.get(model.id) || { providers: new Set<string>(), kinds: new Set<string>() };
+      existing.providers.add(model.owned_by || t("unknownProvider"));
+      existing.kinds.add(getModelKind(model));
+      grouped.set(model.id, existing);
+    }
+
+    return Array.from(grouped.entries())
+      .map(([id, entry]) => ({
+        id,
+        providers: Array.from(entry.providers).sort((a, b) => a.localeCompare(b)),
+        kind: Array.from(entry.kinds).sort((a, b) => a.localeCompare(b)).join(" / "),
+      }))
+      .sort((a, b) => a.id.localeCompare(b.id));
+  }, [allModels, t]);
+
+  const filteredUnifiedModels = useMemo((): UnifiedModelEntry[] => {
+    const query = debouncedCatalogSearch.trim().toLowerCase();
+    if (!query) return unifiedModels;
+
+    return unifiedModels.filter((model) => {
+      if (model.id.toLowerCase().includes(query)) return true;
+      if (model.kind.toLowerCase().includes(query)) return true;
+      return model.providers.some((provider) => provider.toLowerCase().includes(query));
+    });
+  }, [debouncedCatalogSearch, unifiedModels]);
+
+  const catalogProviderCount = useMemo(
+    () => new Set(unifiedModels.flatMap((model) => model.providers)).size,
+    [unifiedModels]
+  );
 
   if (loading) {
     return (
@@ -657,6 +719,106 @@ export default function ApiManagerPageClient() {
               </li>
             </ul>
           </div>
+        </div>
+      </Card>
+
+      <Card>
+        <div className="flex flex-col gap-4">
+          <div className="flex flex-col md:flex-row md:items-start md:justify-between gap-4">
+            <div>
+              <h3 className="font-semibold">Available Models Catalog</h3>
+              <p className="text-sm text-text-muted mt-1">
+                Unified usable models from `/v1/models`, deduplicated by model id and merged across
+                providers.
+              </p>
+            </div>
+            <div className="grid grid-cols-3 gap-2 text-center min-w-full md:min-w-[320px]">
+              <div className="rounded-lg border border-border bg-surface/40 px-3 py-2">
+                <p className="text-lg font-semibold">{filteredUnifiedModels.length}</p>
+                <p className="text-[11px] uppercase tracking-wider text-text-muted">Visible</p>
+              </div>
+              <div className="rounded-lg border border-border bg-surface/40 px-3 py-2">
+                <p className="text-lg font-semibold">{unifiedModels.length}</p>
+                <p className="text-[11px] uppercase tracking-wider text-text-muted">Unique</p>
+              </div>
+              <div className="rounded-lg border border-border bg-surface/40 px-3 py-2">
+                <p className="text-lg font-semibold">{catalogProviderCount}</p>
+                <p className="text-[11px] uppercase tracking-wider text-text-muted">Providers</p>
+              </div>
+            </div>
+          </div>
+
+          <div className="flex flex-col md:flex-row gap-3 md:items-center">
+            <Input
+              value={catalogSearch}
+              onChange={(e) => setCatalogSearch(e.target.value)}
+              placeholder="Search by model, provider, or capability"
+              className="font-mono text-sm"
+            />
+            <Button
+              variant="secondary"
+              icon="content_copy"
+              onClick={() =>
+                copy(filteredUnifiedModels.map((model) => model.id).join("\n"), "catalog_models")
+              }
+              className="shrink-0"
+            >
+              {copied === "catalog_models" ? tc("copied") : "Copy IDs"}
+            </Button>
+          </div>
+
+          {filteredUnifiedModels.length === 0 ? (
+            <div className="rounded-lg border border-dashed border-border px-4 py-8 text-center text-sm text-text-muted">
+              No models match the current filter.
+            </div>
+          ) : (
+            <div className="rounded-xl border border-border overflow-hidden">
+              <div className="grid grid-cols-12 gap-4 px-4 py-3 bg-surface/50 border-b border-border text-xs font-semibold text-text-muted uppercase tracking-wider">
+                <div className="col-span-5">Model</div>
+                <div className="col-span-2">Capability</div>
+                <div className="col-span-4">Providers</div>
+                <div className="col-span-1 text-right">Copy</div>
+              </div>
+              <div className="max-h-[28rem] overflow-y-auto">
+                {filteredUnifiedModels.map((model) => (
+                  <div
+                    key={model.id}
+                    className="grid grid-cols-12 gap-4 px-4 py-3 border-b border-black/[0.03] dark:border-white/[0.03] last:border-b-0 hover:bg-surface/30 transition-colors"
+                  >
+                    <div className="col-span-5 min-w-0">
+                      <code className="text-sm font-mono break-all">{model.id}</code>
+                    </div>
+                    <div className="col-span-2">
+                      <span className="inline-flex items-center rounded-md bg-primary/10 px-2 py-1 text-[11px] font-medium uppercase tracking-wide text-primary">
+                        {model.kind}
+                      </span>
+                    </div>
+                    <div className="col-span-4 flex flex-wrap gap-1.5">
+                      {model.providers.map((provider) => (
+                        <span
+                          key={`${model.id}-${provider}`}
+                          className="inline-flex items-center rounded-md bg-surface px-2 py-1 text-[11px] text-text-muted border border-border"
+                        >
+                          {provider}
+                        </span>
+                      ))}
+                    </div>
+                    <div className="col-span-1 flex justify-end">
+                      <button
+                        onClick={() => copy(model.id, `catalog-${model.id}`)}
+                        className="p-2 hover:bg-black/5 dark:hover:bg-white/5 rounded text-text-muted hover:text-primary transition-colors"
+                        title={`Copy ${model.id}`}
+                      >
+                        <span className="material-symbols-outlined text-[18px]">
+                          {copied === `catalog-${model.id}` ? "check" : "content_copy"}
+                        </span>
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
       </Card>
 
